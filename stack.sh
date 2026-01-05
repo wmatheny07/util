@@ -96,6 +96,8 @@ fi
 COMPOSE_FILES=()
 PROJECT=""
 RUNTIME_ENV=""
+ENV_MANOR=/opt/config/project/.env.mathenymanor
+ENV_CORE=/opt/config/project/.env.core
 
 # Parse flags
 while [[ $# -gt 0 ]]; do
@@ -139,82 +141,28 @@ if [[ -z "$PROJECT" ]]; then
 fi
 
 # Load 1Password and inject env (always, so compose interpolation works consistently)
-# Load 1Password and inject env (always, so compose interpolation works consistently)
-ENV_TEMPLATE="/opt/config/.env"
-ENV_PARTS_DIR="/opt/config/project"
 
-rebuild_env_template() {
-  mkdir -p "$(dirname "$ENV_TEMPLATE")"
+# ------------------------------
+# Select env template by project
+# ------------------------------
+case "$PROJECT" in
+  mathenymanor)
+    SELECTED_ENV_TEMPLATE="$ENV_MANOR"
+    ;;
+  *)
+    SELECTED_ENV_TEMPLATE="$ENV_CORE"
+    ;;
+esac
 
-  # Only include files you explicitly intend (example: core.env, manor.env, secrets.env, etc.)
-  # Adjust this list to match what you actually store in /opt/config/project/
-  local parts=(
-    "$ENV_PARTS_DIR/core.env"
-    "$ENV_PARTS_DIR/manor.env"
-    "$ENV_PARTS_DIR/shared.env"
-    "$ENV_PARTS_DIR/secrets.env"
-  )
-
-  echo "▶ Rebuilding $ENV_TEMPLATE from parts in $ENV_PARTS_DIR"
-
-  : > "$ENV_TEMPLATE"  # truncate/create
-  for p in "${parts[@]}"; do
-    if [[ -f "$p" ]]; then
-      echo "  - adding $(basename "$p")"
-      cat "$p" >> "$ENV_TEMPLATE"
-      echo "" >> "$ENV_TEMPLATE"
-    else
-      echo "  - skipping missing $(basename "$p")"
-    fi
-  done
-
-  if [[ ! -s "$ENV_TEMPLATE" ]]; then
-    echo "❌ Rebuilt $ENV_TEMPLATE is empty. Check $ENV_PARTS_DIR parts list." >&2
-    exit 1
-  fi
-}
-
-# Rebuild template if missing (or force rebuild by setting REBUILD_ENV=1)
-# Load 1Password and inject env (always, so compose interpolation works consistently)
-ENV_TEMPLATE="/opt/config/.env"
-ENV_PARTS_DIR="/opt/config/project"
-
-rebuild_env_template() {
-  mkdir -p "$(dirname "$ENV_TEMPLATE")"
-
-  # Only include files you explicitly intend (example: core.env, manor.env, secrets.env, etc.)
-  # Adjust this list to match what you actually store in /opt/config/project/
-  local parts=(
-    "$ENV_PARTS_DIR/.env.core"
-    "$ENV_PARTS_DIR/.env.mathenymanor"
-  )
-
-  echo "▶ Rebuilding $ENV_TEMPLATE from parts in $ENV_PARTS_DIR"
-
-  : > "$ENV_TEMPLATE"  # truncate/create
-  for p in "${parts[@]}"; do
-    if [[ -f "$p" ]]; then
-      echo "  - adding $(basename "$p")"
-      cat "$p" >> "$ENV_TEMPLATE"
-      echo "" >> "$ENV_TEMPLATE"
-    else
-      echo "  - skipping missing $(basename "$p")"
-    fi
-  done
-
-  if [[ ! -s "$ENV_TEMPLATE" ]]; then
-    echo "❌ Rebuilt $ENV_TEMPLATE is empty. Check $ENV_PARTS_DIR parts list." >&2
-    exit 1
-  fi
-}
-
-# Rebuild template if missing (or force rebuild by setting REBUILD_ENV=1)
-if [[ ! -f "$ENV_TEMPLATE" || "${REBUILD_ENV:-0}" == "1" ]]; then
-  rebuild_env_template
+if [[ ! -f "$SELECTED_ENV_TEMPLATE" ]]; then
+  echo "❌ Selected env template not found: $SELECTED_ENV_TEMPLATE" >&2
+  exit 1
 fi
 
+echo "▶ Using env template: $SELECTED_ENV_TEMPLATE (project=$PROJECT)"
+
 source <(sudo cat /etc/1password/op-service-account.env)
-op inject -i "$ENV_TEMPLATE" -o "$RUNTIME_ENV"
+op inject -i "$SELECTED_ENV_TEMPLATE" -o "$RUNTIME_ENV"
 
 render_nginx_conf() {
   [[ -f "$NGINX_TEMPLATE" ]] || return 0
@@ -315,6 +263,7 @@ case "$CMD" in
   down)
     # down is stack-wide (compose doesn’t support down per-service)
     "${COMPOSE_BIN[@]}" "${FILE_ARGS[@]}" -p "$PROJECT" --env-file "$RUNTIME_ENV" down
+    rm -f "$RUNTIME_ENV"
     ;;
 
   stop)
@@ -359,6 +308,7 @@ case "$CMD" in
     echo "⚠️  NUKING project '$PROJECT' (down -v --remove-orphans)"
     "${COMPOSE_BIN[@]}" "${FILE_ARGS[@]}" -p "$PROJECT" --env-file "$RUNTIME_ENV" \
       down -v --remove-orphans
+    rm -f "$RUNTIME_ENV"
     ;;
 
   *)
@@ -368,11 +318,7 @@ case "$CMD" in
     ;;
 esac
 
-if [[ "$KEEP_ENV" == "true" ]]; then
-  echo "✅ Done (kept env file: $RUNTIME_ENV)"
-else
-  rm -f "$RUNTIME_ENV"
-  echo "✅ Done (deleted env file)"
-fi
+echo "✅ Stack running with env file: $RUNTIME_ENV"
+echo "ℹ️  Env file will be removed on 'down' or 'nuke'"
 
 echo "✅ Done"
