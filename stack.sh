@@ -98,6 +98,7 @@ PROJECT=""
 RUNTIME_ENV=""
 ENV_MANOR=/opt/config/project/.env.mathenymanor
 ENV_CORE=/opt/config/project/.env.core
+ENV_ALL=/opt/config/project/.env.all
 
 # Parse flags
 while [[ $# -gt 0 ]]; do
@@ -147,10 +148,10 @@ fi
 # ------------------------------
 case "$PROJECT" in
   mathenymanor)
-    SELECTED_ENV_TEMPLATE="$ENV_MANOR"
+    SELECTED_ENV_TEMPLATE="$ENV_ALL"
     ;;
   *)
-    SELECTED_ENV_TEMPLATE="$ENV_CORE"
+    SELECTED_ENV_TEMPLATE="$ENV_ALL"
     ;;
 esac
 
