@@ -24,12 +24,17 @@ set +a
 MC="docker run --rm \
   --network ${DOCKER_NET} \
   --dns 127.0.0.11 \
+  -e MC_HOST_minio=http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000 \
   minio/mc"
 
 # Required env vars (fail fast if missing)
 : "${MINIO_ENDPOINT:?MINIO_ENDPOINT not set}"
 : "${MINIO_ROOT_USER:?MINIO_ROOT_USER not set}"
 : "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD not set}"
+
+# Optional user provisioning
+: "${MINIO_WES_USER:?MINIO_WES_USER not set}"
+: "${MINIO_WES_PASSWORD:?MINIO_WES_PASSWORD not set}"
 
 # Optional but recommended
 MINIO_ALIAS=${MINIO_ALIAS:-minio}
@@ -65,6 +70,20 @@ done
 # Enable versioning (safe to re-run)
 for bucket in "${BUCKETS[@]}"; do
   $MC version enable "${MINIO_ALIAS}/${bucket}" >/dev/null 2>&1 || true
+done
+
+# Create named users if missing
+for user_var in MINIO_WES_USER; do
+  user="${!user_var}"
+  pass_var="${user_var/USER/PASSWORD}"
+  pass="${!pass_var}"
+  if ! $MC admin user info "${MINIO_ALIAS}" "${user}" >/dev/null 2>&1; then
+    echo "➕ Creating MinIO user: ${user}"
+    $MC admin user add "${MINIO_ALIAS}" "${user}" "${pass}"
+  else
+    echo "✔ MinIO user exists: ${user}"
+  fi
+  $MC admin policy attach "${MINIO_ALIAS}" readwrite --user "${user}" >/dev/null 2>&1 || true
 done
 
 echo "🎉 MinIO ensure complete"
