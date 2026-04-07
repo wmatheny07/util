@@ -57,6 +57,7 @@ ensure_postgres_dbs() {
     [[ -n "${MLFLOW_DB_NAME:-}"    ]] && dbs+=("${MLFLOW_DB_NAME}")
     [[ -n "${SUPERSET_DB_NAME:-}"  ]] && dbs+=("${SUPERSET_DB_NAME}")
     [[ -n "${ESPN_DB_NAME:-}"      ]] && dbs+=("${ESPN_DB_NAME}")
+    [[ -n "${DAGSTER_DB_NAME:-}"   ]] && dbs+=("${DAGSTER_DB_NAME}")
 
     [[ ${#dbs[@]} -eq 0 ]] && dbs=(metabase airflow mlflow superset)
   fi
