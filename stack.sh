@@ -164,7 +164,7 @@ fi
 echo "▶ Using env template: $SELECTED_ENV_TEMPLATE (project=$PROJECT)"
 
 source <(sudo cat /etc/1password/op-service-account.env)
-op inject -i "$SELECTED_ENV_TEMPLATE" -o "$RUNTIME_ENV"
+op inject -i "$SELECTED_ENV_TEMPLATE" | tr -d '\r' > "$RUNTIME_ENV"
 
 render_nginx_conf() {
   [[ -f "$NGINX_TEMPLATE" ]] || return 0
