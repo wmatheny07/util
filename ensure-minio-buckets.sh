@@ -47,6 +47,11 @@ BUCKETS=(
   "${MINIO_BUCKET_DATA:-raw-data}"
 )
 
+# Buckets that require SSE-S3 encryption at rest
+ENCRYPTED_BUCKETS=(
+  "${MINIO_MAIL_BUCKET:-mail-raw}"
+)
+
 # Wait for MinIO to be ready
 wait_for_minio
 
@@ -84,6 +89,18 @@ for user_var in MINIO_WES_USER; do
     echo "✔ MinIO user exists: ${user}"
   fi
   $MC admin policy attach "${MINIO_ALIAS}" readwrite --user "${user}" >/dev/null 2>&1 || true
+done
+
+# Create encrypted buckets and enable SSE-S3
+for bucket in "${ENCRYPTED_BUCKETS[@]}"; do
+  if $MC ls "${MINIO_ALIAS}/${bucket}" >/dev/null 2>&1; then
+    echo "✔ Bucket exists: ${bucket}"
+  else
+    echo "➕ Creating bucket: ${bucket}"
+    $MC mb --region "${MINIO_REGION}" "${MINIO_ALIAS}/${bucket}"
+  fi
+  echo "🔒 Enabling SSE-S3 on: ${bucket}"
+  $MC encrypt set SSE-S3 "${MINIO_ALIAS}/${bucket}"
 done
 
 echo "🎉 MinIO ensure complete"
