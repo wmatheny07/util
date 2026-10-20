@@ -1,0 +1,287 @@
+# Auto-remediation config for /opt/util/auto-remediate.py
+#
+# Each [images."<image ref>"] entry says how to refresh an image on its CURRENT tag
+# and how to prove the containers using it are still fine afterwards. The runner
+# never changes a tag or a version pin — upgrades that need that are left to the
+# plan in the nightly security email.
+#
+# Keys (all optional except strategy):
+#   strategy        "pull" (re-pull the same tag) | "build" (no-cache rebuild) | "skip"
+#   build           { context, dockerfile, args = {..} }      — for strategy = "build"
+#   version_cmd     shell command run in a throwaway container of the image; first
+#                   version-looking string in the output is compared old vs new
+#   max_jump        "none" | "patch" | "minor" | "any"  (default "any")
+#                     patch: first two components must match (16.13 -> 16.14 ok, 6.1 -> 6.2 not)
+#                     minor: first component must match
+#   invariant_cmds  commands whose output must be byte-identical old vs new (e.g. glibc
+#                   under Postgres — a collation library change can corrupt indexes)
+#   preserve_paths  files in the container's writable layer copied old -> new container
+#   ignore_layer_paths  writable-layer files known to be disposable (skips the state guard)
+#   backup_pg_dbs   Postgres databases dumped (pg_dump -Fc) before the swap
+#   backup_container_paths  directories tarred from inside the old container before the swap
+#   ready_timeout   seconds to wait for health / stability after start (default 180)
+#   stop_timeout    seconds for a graceful stop (default 30)
+#   est_minutes     rough duration, used to avoid starting work that can't finish in the window
+#   tests           list of checks run after the swap; any failure rolls the image back
+#                     { type = "http", url, network = "core_data_net", expect = [200] | "lt500" }
+#                     { type = "exec", container, cmd = [..] }   (exit code 0 = pass)
+#   Every container is also checked for: running, not restarting, healthcheck healthy.
+
+[window]
+timezone     = "America/New_York"
+start        = "01:00"   # runner refuses to do anything outside [start, end)
+end          = "05:00"
+last_start   = "04:15"   # no new image is started after this
+finish_by    = "04:45"   # an image is skipped if now + est_minutes passes this
+
+[runner]
+scanner_url     = "http://localhost:18100"
+scanner_container = "security-scanner"
+backup_dir      = "/media/nasdrive/backups/auto-remediate"
+backup_keep_days = 14
+log_dir         = "/home/wes/crons/log"
+curl_image      = "curlimages/curl:8.11.1"
+ignored_packages = ["linux-libc-dev"]   # keep in sync with TRIVY_IGNORED_PACKAGES in the scanner
+exclude = [
+  "kindest/node",                       # Airbyte control plane — upgrade with `abctl local install`
+]
+
+# ── Data stores (first, so every later test also exercises them) ──────────────
+
+[images."pgvector/pgvector:pg16"]
+strategy       = "pull"
+version_cmd    = "postgres --version"
+max_jump       = "minor"
+invariant_cmds = ["ldd --version | head -1"]
+stop_timeout   = 120
+ready_timeout  = 240
+est_minutes    = 10
+tests = [
+  { type = "exec", container = "postgres", cmd = ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" && psql -U \"$POSTGRES_USER\" -d analytics -tAc 'select 1'"] },
+]
+
+[images."redis:7.2-bookworm"]
+strategy    = "pull"
+version_cmd = "redis-server --version"
+max_jump    = "patch"
+est_minutes = 5
+tests = [
+  { type = "exec", container = "redis",         cmd = ["redis-cli", "ping"] },
+  { type = "exec", container = "airflow-redis", cmd = ["redis-cli", "ping"] },
+]
+
+[images."minio/minio:latest"]
+strategy     = "pull"
+version_cmd  = "minio --version | head -1"
+max_jump     = "any"
+stop_timeout = 60
+est_minutes  = 5
+tests = [
+  { type = "http", url = "http://minio:9000/minio/health/live" },
+]
+
+[images."qdrant/qdrant:latest"]
+strategy    = "pull"
+version_cmd = "/qdrant/qdrant --version"
+max_jump    = "patch"
+est_minutes = 5
+tests = [
+  { type = "http", url = "http://qdrant:6333/readyz" },
+]
+
+# ── Core apps ─────────────────────────────────────────────────────────────────
+
+[images."superset-with-playwright:latest"]
+strategy      = "build"
+build         = { context = "/opt/ppd/stacks/core", dockerfile = "/opt/ppd/stacks/core/dockerfile.superset" }
+version_cmd   = "/app/.venv/bin/python -c 'import importlib.metadata as m; print(m.version(\"apache-superset\"))'"
+max_jump      = "patch"
+backup_pg_dbs = ["superset"]
+ready_timeout = 300
+est_minutes   = 20
+tests = [
+  { type = "http", url = "http://superset:8088/health" },
+]
+
+[images."metabase/metabase:latest"]
+strategy      = "pull"
+version_cmd   = "unzip -p /app/metabase.jar version.properties 2>/dev/null | grep ^tag || (cd /tmp && jar xf /app/metabase.jar version.properties && grep ^tag version.properties)"
+max_jump      = "patch"
+backup_pg_dbs = ["metabase"]
+ignore_layer_paths = ["/metabase.db", "/plugins/sample-database.db.mv.db"]
+ready_timeout = 420
+est_minutes   = 10
+tests = [
+  { type = "http", url = "http://metabase:3000/api/health" },
+]
+
+[images."ghcr.io/mlflow/mlflow:latest"]
+strategy       = "pull"
+version_cmd    = "python -c 'import importlib.metadata as m; print(m.version(\"mlflow\"))'"
+max_jump       = "patch"
+# The tracking DB is sqlite:///mlflow.db relative to "/", i.e. in the container
+# layer, not the /mlflow volume — carry it across (and back it up).
+preserve_paths = ["/mlflow.db"]
+est_minutes    = 5
+tests = [
+  { type = "http", url = "http://mlflow:5000/health" },
+]
+
+[images."jupyter-gpu:local"]
+strategy      = "build"
+build         = { context = "/opt/ppd/stacks/core", dockerfile = "/opt/ppd/stacks/core/dockerfile.jupyter" }
+ready_timeout = 900   # the container pip-installs its toolset on start
+est_minutes   = 35
+tests = [
+  { type = "http", url = "http://jupyter-gpu:8888/api", expect = "lt500" },
+]
+
+[images."python:3.11-slim"]   # dk-ingest
+strategy    = "pull"
+version_cmd = "python --version"
+max_jump    = "patch"
+est_minutes = 3
+tests = []
+
+# ── Orchestration ─────────────────────────────────────────────────────────────
+
+[images."custom-airflow-ml-dbt:2.10.2"]
+strategy      = "build"
+build         = { context = "/opt/ppd/stacks/airflow", dockerfile = "/opt/ppd/stacks/airflow/dockerfile" }
+version_cmd   = "python -c 'import importlib.metadata as m; print(m.version(\"apache-airflow\"))'"
+max_jump      = "none"
+backup_pg_dbs = ["airflow"]
+ready_timeout = 300
+est_minutes   = 20
+tests = [
+  { type = "http", url = "http://airflow-webserver:8080/health" },
+]
+
+[images."ppd-dagster:latest"]
+strategy      = "build"
+build         = { context = "/opt/ppd/stacks/dagster", dockerfile = "/opt/ppd/stacks/dagster/Dockerfile" }
+version_cmd   = "python -c 'import importlib.metadata as m; print(m.version(\"dagster\"))'"
+max_jump      = "patch"
+ready_timeout = 240
+est_minutes   = 15
+tests = [
+  { type = "http", url = "http://dagster-webserver:3000/server_info" },
+]
+
+# ── Streaming ─────────────────────────────────────────────────────────────────
+
+[images."apache/kafka:3.7.0"]
+strategy      = "pull"
+stop_timeout  = 60
+ready_timeout = 240
+est_minutes   = 5
+tests = []
+
+[images."provectuslabs/kafka-ui:v0.7.2"]
+strategy    = "pull"
+est_minutes = 3
+tests = [
+  { type = "http", url = "http://kafka-ui:8080/actuator/health", expect = "lt500" },
+]
+
+[images."weather-weather-producer:latest"]
+strategy    = "build"
+build       = { context = "/opt/ppd/stacks/weather/producer", dockerfile = "/opt/ppd/stacks/weather/producer/Dockerfile" }
+est_minutes = 4
+tests = []
+
+[images."weather-weather-consumer:latest"]
+strategy    = "build"
+build       = { context = "/opt/ppd/stacks/weather/consumer", dockerfile = "/opt/ppd/stacks/weather/consumer/Dockerfile" }
+est_minutes = 4
+tests = []
+
+# ── MathenyManor ──────────────────────────────────────────────────────────────
+
+[images."mathenymanor-agent_api:latest"]
+strategy    = "build"
+build       = { context = "/opt/mathenymanor/agent_api", dockerfile = "/opt/mathenymanor/agent_api/Dockerfile" }
+est_minutes = 5
+tests = [
+  { type = "http", url = "http://agent-api:8000/api/health" },
+]
+
+[images."mathenymanor-agent_web:latest"]
+strategy    = "build"
+build       = { context = "/opt/mathenymanor/agent_web", dockerfile = "/opt/mathenymanor/agent_web/Dockerfile", args = { VITE_API_URL = "https://agents.mathenymanor.com/api" } }
+est_minutes = 6
+tests = [
+  { type = "http", url = "http://agent-web:80/", network = "mathenymanor.docker" },
+]
+
+[images."mathenymanor-health-api:latest"]
+strategy    = "build"
+build       = { context = "/opt/mathenymanor/health-api", dockerfile = "/opt/mathenymanor/health-api/Dockerfile" }
+est_minutes = 5
+tests = [
+  { type = "http", url = "http://health-api:8000/docs" },
+]
+
+[images."rclone/rclone:latest"]
+strategy    = "pull"
+version_cmd = "rclone version | head -1"
+max_jump    = "minor"
+est_minutes = 3
+tests = [
+  { type = "http", url = "http://rclone:8090/",      network = "mathenymanor.docker", expect = "lt500" },
+  { type = "http", url = "http://rclone-mail:8091/", expect = "lt500" },
+]
+
+[images."ghcr.io/home-assistant/home-assistant:stable"]
+strategy      = "pull"
+version_cmd   = "python3 -c 'import importlib.metadata as m; print(m.version(\"homeassistant\"))'"
+max_jump      = "minor"
+backup_container_paths = ["/config"]
+ready_timeout = 300
+est_minutes   = 8
+tests = [
+  { type = "http", url = "http://127.0.0.1:8123/", network = "host" },
+]
+
+[images."homebridge/homebridge:latest"]
+strategy      = "pull"
+ready_timeout = 240
+est_minutes   = 5
+tests = [
+  { type = "http", url = "http://127.0.0.1:8581/", network = "host", expect = "lt500" },
+]
+
+[images."linuxserver/plex:latest"]
+strategy      = "pull"
+ready_timeout = 240
+est_minutes   = 5
+tests = [
+  { type = "http", url = "http://127.0.0.1:32400/identity", network = "host" },
+]
+
+# ── Edge + security tooling (last: nginx fronts everything, scanner runs the scans) ──
+
+[images."ppd-nginx:latest"]
+strategy    = "build"
+build       = { context = "/opt/nginx", dockerfile = "/opt/nginx/Dockerfile" }
+est_minutes = 4
+tests = [
+  { type = "exec", container = "nginx", cmd = ["nginx", "-t"] },
+  { type = "http", url = "http://nginx:80/", expect = "lt500" },
+]
+
+[images."ppd-security-frontend:latest"]
+strategy    = "build"
+build       = { context = "/opt/ppd/stacks/security/frontend", dockerfile = "/opt/ppd/stacks/security/frontend/Dockerfile" }
+est_minutes = 4
+tests = [
+  { type = "http", url = "http://security-frontend:80/" },
+]
+
+[images."ppd-security-scanner:latest"]
+strategy    = "build"
+build       = { context = "/opt/ppd/stacks/security/scanner", dockerfile = "/opt/ppd/stacks/security/scanner/Dockerfile" }
+est_minutes = 6
+tests = [
+  { type = "http", url = "http://security-scanner:8000/health" },
+]
