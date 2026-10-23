@@ -143,11 +143,23 @@ class Scanner:
                 time.sleep(5)
         raise RemediationError("security scanner did not come up")
 
+    def _src_changed_since_start(self) -> bool:
+        info = inspect("container", self.container)
+        if not info:
+            return False
+        started = datetime.fromisoformat(info["State"]["StartedAt"][:26].rstrip("Z") + "+00:00").timestamp()
+        for m in info.get("Mounts", []):
+            if m.get("Destination") == "/app/src":
+                return any(p.stat().st_mtime > started
+                           for p in Path(m["Source"]).rglob("*") if p.suffix in (".py", ".sql"))
+        return False
+
     def ensure_current_code(self) -> None:
-        """src/ is bind-mounted; a plain restart loads new code if the endpoints are missing."""
+        """src/ is bind-mounted; a plain restart loads new code if it changed since the container started."""
         try:
             self._req("GET", "/internal/remediation-candidates")
-            return
+            if not self._src_changed_since_start():
+                return
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
                 raise
