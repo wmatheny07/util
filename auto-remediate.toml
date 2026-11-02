@@ -67,7 +67,6 @@ max_jump    = "patch"
 est_minutes = 5
 tests = [
   { type = "exec", container = "redis",         cmd = ["redis-cli", "ping"] },
-  { type = "exec", container = "airflow-redis", cmd = ["redis-cli", "ping"] },
 ]
 
 [images."minio/minio:latest"]
@@ -144,18 +143,6 @@ est_minutes = 3
 tests = []
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
-
-[images."custom-airflow-ml-dbt:2.10.2"]
-strategy      = "build"
-build         = { context = "/opt/ppd/stacks/airflow", dockerfile = "/opt/ppd/stacks/airflow/dockerfile" }
-version_cmd   = "python -c 'import importlib.metadata as m; print(m.version(\"apache-airflow\"))'"
-max_jump      = "none"
-backup_pg_dbs = ["airflow"]
-ready_timeout = 300
-est_minutes   = 20
-tests = [
-  { type = "http", url = "http://airflow-webserver:8080/health" },
-]
 
 [images."ppd-dagster:latest"]
 strategy      = "build"
